@@ -1,8 +1,6 @@
-// firebase/auth.js
 import { 
   auth,
-  db,
-  storage
+  db
 } from './config.js';
 import {
   createUserWithEmailAndPassword,
@@ -15,7 +13,9 @@ import {
   updatePassword,
   GoogleAuthProvider,
   signInWithPopup,
-  sendEmailVerification
+  sendEmailVerification,
+  reauthenticateWithCredential,
+  EmailAuthProvider
 } from "firebase/auth";
 import { 
   doc, 
@@ -25,38 +25,49 @@ import {
   serverTimestamp 
 } from "firebase/firestore";
 
-// Create new user with email/password
-export const signUp = async (email, password, displayName) => {
+// Create new user
+export const registerUser = async (email, password, displayName) => {
   try {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
     
-    // Update profile
     await updateProfile(user, { displayName });
-    
-    // Send verification email
     await sendEmailVerification(user);
     
-    // Create user document in Firestore
+    // Create user document
     await setDoc(doc(db, "users", user.uid), {
       uid: user.uid,
-      displayName: displayName,
-      email: email,
+      displayName,
+      email,
       photoURL: "",
       bio: "",
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-      isOnline: true,
       lastSeen: serverTimestamp(),
+      status: "online",
       privacy: {
         profileVisible: true,
         searchable: true,
-        showOnlineStatus: true
+        showOnlineStatus: true,
+        showLastSeen: true
       },
       settings: {
         theme: "light",
-        notifications: true,
-        twoFactorEnabled: false
+        language: "en",
+        notifications: {
+          messages: true,
+          groups: true,
+          friendRequests: true
+        },
+        security: {
+          twoFactorEnabled: false,
+          loginAlerts: true
+        }
+      },
+      stats: {
+        friendsCount: 0,
+        groupsCount: 0,
+        messagesSent: 0
       }
     });
     
@@ -66,35 +77,33 @@ export const signUp = async (email, password, displayName) => {
   }
 };
 
-// Sign in with email/password
-export const signIn = async (email, password) => {
+// Sign in
+export const loginUser = async (email, password) => {
   try {
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    const user = userCredential.user;
     
-    // Update user status to online
-    await updateDoc(doc(db, "users", userCredential.user.uid), {
-      isOnline: true,
+    await updateDoc(doc(db, "users", user.uid), {
+      status: "online",
       lastSeen: serverTimestamp()
     });
     
-    return { success: true, user: userCredential.user };
+    return { success: true, user };
   } catch (error) {
     return { success: false, error: error.message };
   }
 };
 
-// Sign in with Google
+// Google sign in
 export const signInWithGoogle = async () => {
   try {
     const provider = new GoogleAuthProvider();
     const userCredential = await signInWithPopup(auth, provider);
     const user = userCredential.user;
     
-    // Check if user exists in Firestore
     const userDoc = await getDoc(doc(db, "users", user.uid));
     
     if (!userDoc.exists()) {
-      // Create new user document
       await setDoc(doc(db, "users", user.uid), {
         uid: user.uid,
         displayName: user.displayName,
@@ -103,23 +112,32 @@ export const signInWithGoogle = async () => {
         bio: "",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-        isOnline: true,
         lastSeen: serverTimestamp(),
+        status: "online",
         privacy: {
           profileVisible: true,
           searchable: true,
-          showOnlineStatus: true
+          showOnlineStatus: true,
+          showLastSeen: true
         },
         settings: {
           theme: "light",
-          notifications: true,
-          twoFactorEnabled: false
+          language: "en",
+          notifications: {
+            messages: true,
+            groups: true,
+            friendRequests: true
+          }
+        },
+        stats: {
+          friendsCount: 0,
+          groupsCount: 0,
+          messagesSent: 0
         }
       });
     } else {
-      // Update existing user status
       await updateDoc(doc(db, "users", user.uid), {
-        isOnline: true,
+        status: "online",
         lastSeen: serverTimestamp(),
         photoURL: user.photoURL
       });
@@ -132,12 +150,11 @@ export const signInWithGoogle = async () => {
 };
 
 // Sign out
-export const logout = async () => {
+export const logoutUser = async () => {
   try {
     if (auth.currentUser) {
-      // Update user status to offline
       await updateDoc(doc(db, "users", auth.currentUser.uid), {
-        isOnline: false,
+        status: "offline",
         lastSeen: serverTimestamp()
       });
     }
@@ -149,25 +166,20 @@ export const logout = async () => {
   }
 };
 
-// Update user profile
-export const updateUserProfile = async (updates) => {
+// Update profile
+export const updateUserProfile = async (uid, data) => {
   try {
-    const user = auth.currentUser;
-    if (!user) throw new Error("No user logged in");
-    
-    // Update in Firebase Auth
-    if (updates.displayName || updates.photoURL) {
-      await updateProfile(user, {
-        displayName: updates.displayName || user.displayName,
-        photoURL: updates.photoURL || user.photoURL
-      });
-    }
-    
-    // Update in Firestore
-    await updateDoc(doc(db, "users", user.uid), {
-      ...updates,
+    await updateDoc(doc(db, "users", uid), {
+      ...data,
       updatedAt: serverTimestamp()
     });
+    
+    if (data.displayName || data.photoURL) {
+      await updateProfile(auth.currentUser, {
+        displayName: data.displayName || auth.currentUser.displayName,
+        photoURL: data.photoURL || auth.currentUser.photoURL
+      });
+    }
     
     return { success: true };
   } catch (error) {
@@ -175,17 +187,45 @@ export const updateUserProfile = async (updates) => {
   }
 };
 
-// Get current user
-export const getCurrentUser = () => {
-  return new Promise((resolve, reject) => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      unsubscribe();
-      resolve(user);
-    }, reject);
-  });
+// Change password
+export const changePassword = async (currentPassword, newPassword) => {
+  try {
+    const user = auth.currentUser;
+    const credential = EmailAuthProvider.credential(user.email, currentPassword);
+    
+    await reauthenticateWithCredential(user, credential);
+    await updatePassword(user, newPassword);
+    
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+};
+
+// Delete account
+export const deleteAccount = async (password) => {
+  try {
+    const user = auth.currentUser;
+    const credential = EmailAuthProvider.credential(user.email, password);
+    
+    await reauthenticateWithCredential(user, credential);
+    
+    // Delete user data from Firestore
+    await updateDoc(doc(db, "users", user.uid), {
+      deleted: true,
+      deletedAt: serverTimestamp()
+    });
+    
+    // Delete auth account
+    await user.delete();
+    
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 };
 
 // Auth state listener
-export const onAuthChange = (callback) => {
+export const onAuthStateChange = (callback) => {
   return onAuthStateChanged(auth, callback);
 };
