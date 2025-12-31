@@ -127,3 +127,20 @@ firebase deploy
 # Deploy with specific project
 firebase deploy --project insightful-ai-b3hca
 ```
+# npm run
+```
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Build for production
+npm run build
+
+# Preview production build
+npm run preview
+
+# Deploy to Firebase
+npm run deploy
+```
